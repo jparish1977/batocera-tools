@@ -109,6 +109,47 @@ Every service is stopped, every module is unloaded, disks are synced, and
 `poweroff -f` is called. The failure is entirely in the firmware's response
 to the kernel's ACPI power-off request.
 
+### SteamOS 2.0 Forensics
+
+The Alienware Alpha originally shipped with SteamOS, which shut down
+correctly. A SteamOS 2.0 VM was booted and examined to determine what
+Valve did differently. The findings:
+
+- **Kernel**: `4.16.0-0.steamos2.1-amd64`
+- **Kernel parameters**: `root=UUID=... ro fbcon=vc:2-6` — **no ACPI
+  parameters whatsoever**
+- **GRUB config**: No ACPI-related options
+- **Initramfs**: Standard ACPI modules only (`button.ko`, `fan.ko`,
+  `video.ko`, `thermal.ko`) — no DSDT override, no custom ACPI tables
+- **Kernel config**: No unusual ACPI/power management options
+
+**The critical difference: `acpid`**
+
+SteamOS ran the `acpid` daemon, which caught power button ACPI events
+and routed them through a handler chain:
+
+1. `acpid` catches the power button event
+2. `/etc/acpi/powerbtn-acpi-support.sh` runs
+3. Script sources `/usr/share/acpi-support/policy-funcs`
+4. `policy-funcs` checks for power management daemons (upowerd,
+   xfce4-power-manager, systemd-logind, etc.)
+5. If systemd-logind is available, shutdown is handled via D-Bus call to
+   `org.freedesktop.systemd1.Manager` → `shutdown.target`
+6. If no PM daemon is found, falls through to `/sbin/shutdown -h -P now`
+
+The key insight is that SteamOS used **systemd's power management
+infrastructure** to handle the shutdown, which includes proper ACPI S5
+sequencing through logind. Batocera, using BusyBox/sysvinit with no
+systemd and no running `acpid` daemon, calls `/sbin/poweroff` directly,
+which hits the kernel's broken ACPI power-off code path.
+
+**Conclusion**: This is a Linux kernel regression in the ACPI power-off
+path between kernel 4.16 (works) and 6.4 (broken) affecting the
+Alienware ASM100 chipset. SteamOS avoided the issue not through any
+special configuration but by using systemd's power management stack,
+which handles S5 transitions differently than a direct `poweroff` call.
+Batocera's simpler init system exposes the kernel bug.
+
 ## The Solution
 
 Bypass the kernel's broken ACPI power-off path entirely by writing the S5
