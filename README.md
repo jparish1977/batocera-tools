@@ -1,16 +1,21 @@
 # batocera-tools
 
-Hardware-specific fixes and diagnostic tools for [Batocera Linux](https://batocera.org/).
+Hardware fixes and diagnostic tools for [Batocera Linux](https://batocera.org/)
+and Linux in general.
 
 ## Fixes
 
-### [Alienware ASM100 (Alpha / Steam Machine) Shutdown Fix](alienware-asm100/)
-The Alienware Alpha's ACPI power-off implementation is broken under Linux.
-The kernel completes the shutdown sequence but the hardware never cuts power
--- LEDs stay on and the machine requires a hard power-off via the power button.
+### [Universal ACPI Power-Off Fix](acpi-poweroff-fix/)
+For any x86 Linux machine where shutdown completes but the hardware never
+cuts power. Automatically reads the correct PM register address and sleep
+type from the machine's ACPI tables at runtime — no hardcoded values,
+works on any affected hardware.
 
-This fix bypasses the broken ACPI path by writing the S5 sleep type value
-directly to the PM1a control register, cleanly powering off the hardware.
+### [Alienware ASM100 (Alpha / Steam Machine) Shutdown Fix](alienware-asm100/)
+The original investigation that led to the universal fix. Full writeup of
+the debugging process, every approach tested, SteamOS 2.0 forensic analysis
+revealing the root cause (kernel ACPI regression between 4.16 and 6.x),
+and Batocera-specific installation instructions.
 
 ## Contributing
 Found a hardware-specific fix for Batocera? PRs welcome.
