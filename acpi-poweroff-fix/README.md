@@ -1,138 +1,160 @@
-# acpi-poweroff-fix — Universal Linux ACPI Power-Off Fix
+# acpi-poweroff-fix -- Universal Linux ACPI Power-Off Fix
 
 ## The Problem
 
-Some x86 Linux machines complete their shutdown sequence but never actually
-cut power. The kernel reaches its final ACPI power-off call, the call
-completes without error, but the hardware stays on — LEDs lit, fans running,
-requiring a hard power-off via the power button.
+Some x86 Linux machines complete their shutdown sequence but never actually cut
+power. The kernel reaches its final ACPI power-off call, the call completes
+without error, but the hardware stays on: LEDs lit, fans running, requiring the
+power button to be held.
 
-This is typically caused by a regression in the kernel's ACPI subsystem that
-breaks the S5 (soft-off) transition for certain chipsets.
+This is typically a regression in the kernel's ACPI subsystem that breaks the
+S5 (soft-off) transition for a particular chipset.
 
 ## The Fix
 
-Bypass the kernel's ACPI power-off path and write the S5 sleep type value
-directly to the PM1a control register via `/dev/port`.
+Write the S5 sleep type directly to the PM1a control register through
+`/dev/port`, bypassing the broken ACPI path.
 
-The script **automatically reads** the correct values from the machine's
-ACPI tables at runtime:
+`acpi_s5_poweroff.sh` reads the values from the machine's own ACPI tables at
+runtime, so nothing is hardcoded:
 
-1. **PM1a_CNT_BLK port address** — from the FADT (offset 0x48)
-2. **S5 sleep type value** — from the DSDT `_S5_` package
-3. **Register value** — calculated as `(SLP_TYP << 10) | SLP_EN`
+1. **PM1a_CNT_BLK** port address, from `X_PM1a_CNT_BLK` at FADT offset
+   `0xAC` when it declares SystemIO, otherwise the legacy field at `0x40`
+2. **S5 SLP_TYP**, from the `_S5_` package in the DSDT
+3. Register value, computed as `(SLP_TYP << 10) | SLP_EN`
 
-No hardcoded values. Works on any x86 Linux machine with:
-- Python 3
-- `/dev/port` (standard on x86)
-- `/sys/firmware/acpi/tables/` (standard on UEFI/ACPI systems)
-
-If ACPI table parsing fails, it falls back to `/sbin/poweroff.real`.
-
-## Usage
-
-### Quick Test
+**Not offset `0x48`.** That is PM2_CNT_BLK. An earlier version of this script
+read it and got a valid-looking I/O port that simply does nothing when you
+write S5 to it. Check your values before trusting them:
 
 ```bash
-# Back up the real poweroff first
+./acpi_s5_poweroff.sh --dry-run
+```
+
+This resolves and prints the port, sleep type and register value without
+writing anything or changing the power state.
+
+Requirements: Python 3, `/dev/port`, and `/sys/firmware/acpi/tables/`. If
+parsing or the write fails, the script falls through to `exec /sbin/halt -dhp`
+so the machine ends up exactly where it would have without the fix.
+
+## Where to Hook It -- Read This Before Installing
+
+**Do not replace `/sbin/poweroff`, `/sbin/halt`, `/sbin/reboot` or
+`/sbin/shutdown`.** On sysvinit and BusyBox alike these are a single multi-call
+binary behind several symlinks, dispatching on `argv[0]`. Overwriting one
+overwrites all of them.
+
+This is not hypothetical. The first version of this fix shipped with:
+
+```bash
 cp /sbin/poweroff /sbin/poweroff.real
-
-# Replace with the fix
-cp acpi_poweroff.sh /sbin/poweroff
-chmod +x /sbin/poweroff
-
-# Test
-shutdown -h now
+cp acpi_poweroff.sh /sbin/poweroff        # WRONG
 ```
 
-### Permanent Installation on Batocera
+`cp` writes **through** a symlink rather than replacing it, so on a machine
+where `/sbin/poweroff -> /sbin/halt` that second line overwrote the multi-call
+binary. `/sbin/reboot` pointed at the same file, so asking the machine to
+restart powered it off instead. See `../alienware-asm100/README.md` for the
+full write-up.
 
-Batocera uses a read-only squashfs root, so `/sbin/poweroff` resets each
-boot. Add to `/userdata/system/custom.sh`:
+There is a second reason not to hook the command. Calling the power-off script
+in place of `poweroff` runs it **immediately**, before init has stopped any
+services or unmounted anything. `sync` flushes the page cache but cannot flush
+what a process has not written yet, so anything an application writes on exit
+is lost. The register write belongs at the **end** of the shutdown, as the
+final action on the power-off path only.
 
-```bash
-cp /path/to/acpi_poweroff.sh /sbin/poweroff
-chmod +x /sbin/poweroff
+### sysvinit
+
+Point the runlevel-0 `wait` action in `/etc/inittab` at the script, and leave
+the runlevel-6 action alone:
+
+```
+hlt0:0:wait:/sbin/acpi-s5-poweroff      # was /sbin/halt -dhp
+reb0:6:wait:/sbin/reboot                # unchanged
 ```
 
-### Permanent Installation on systemd Distros
+Then `telinit q`, because init parsed the table at boot.
 
-```bash
-cp acpi_poweroff.sh /usr/local/sbin/acpi-poweroff
-chmod +x /usr/local/sbin/acpi-poweroff
+Install the script on the **root** filesystem, not on a separate data
+partition. Typical inittab runs `umount -a -r -f` before the halt action, so a
+script living elsewhere may be unreachable by the time it is needed.
 
-cat > /etc/systemd/system/acpi-poweroff.service << 'EOF'
+### systemd
+
+**Untested.** A unit ordered late in the shutdown transaction:
+
+```ini
 [Unit]
-Description=ACPI Direct Power Off
+Description=ACPI S5 direct power off
 DefaultDependencies=no
+After=umount.target
 Before=poweroff.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/acpi-poweroff
+ExecStart=/sbin/acpi-s5-poweroff
 
 [Install]
 WantedBy=poweroff.target
-EOF
-
-systemctl enable acpi-poweroff
 ```
 
-## Origin Story
+Confirm the ordering on your system before relying on it. The requirements are
+that it runs after filesystems are down, and only on the power-off path, never
+on reboot.
 
-This fix was developed while debugging a years-old shutdown bug on the
-Alienware Alpha (ASM100/Steam Machine) running Batocera Linux. The full
-investigation is documented in the [alienware-asm100](../alienware-asm100/)
-directory, including:
+### Read-only root with an overlay (Batocera and similar)
 
-- Detailed ACPI debugging methodology
-- Every approach tested and why it failed
-- SteamOS 2.0 forensic analysis revealing the root cause (kernel ACPI
-  regression between 4.16 and 6.x)
-- How systemd's power management stack accidentally avoided the bug
+`/sbin` and `/etc` are rebuilt from the squashfs on every boot, so the hook has
+to be reapplied each time from a persistent location. See
+`../alienware-asm100/apply-at-boot.sh` for a worked example, including
+restoring a multi-call binary that an earlier install clobbered.
 
-## How It Works
+## Finding the Values by Hand
 
-The ACPI specification defines a standard mechanism for entering sleep
-states (including S5/soft-off):
+The script does this for you. To check its work:
 
-1. The OS reads the `PM1a_CNT_BLK` I/O port address from the FADT
-2. The OS reads the `SLP_TYP` value for the desired sleep state from the DSDT
-3. The OS writes `(SLP_TYP << 10) | SLP_EN` to the PM1a control register
-4. The chipset's power management controller sequences the power rails down
+```bash
+# PM1a_CNT_BLK: legacy field at FADT offset 0x40, 4 bytes little-endian,
+# and the ACPI 2.0 Generic Address Structure at 0xAC. They should agree.
+python3 -c "
+import struct
+d = open('/sys/firmware/acpi/tables/FACP','rb').read()
+print('legacy @0x40:', hex(struct.unpack_from('<I', d, 0x40)[0]))
+print('X_PM1a  @0xAC:', 'space_id', d[0xAC], hex(struct.unpack_from('<Q', d, 0xB0)[0]))
+"
 
-This is exactly what the kernel does when you call `poweroff`. On affected
-machines, something in the kernel's ACPI layer prevents the write from
-reaching the hardware. This script does the write directly through
-`/dev/port`, bypassing the kernel's ACPI subsystem entirely.
+# S5 SLP_TYP from the DSDT
+python3 -c "
+d = open('/sys/firmware/acpi/tables/DSDT','rb').read()
+i = d.find(b'_S5_')
+for j in range(i, i+30):
+    if d[j] == 0x12:
+        v = j + 3
+        print('SLP_TYP:', d[v+1] if d[v] == 0x0A else d[v])
+        break
+"
+```
 
-## Safety
+Then `value = (SLP_TYP << 10) | (1 << 13)`.
 
-- **Same operation as a normal shutdown** — identical register, identical
-  value, just a different code path
-- **Equivalent to a soft power button press** — the chipset handles power
-  sequencing safely
-- **Safer than holding the power button** — which is an unconditional hard
-  power-off that risks data corruption
-- **Graceful fallback** — if ACPI table parsing fails, falls back to the
-  original `poweroff` binary
+## Diagnosing
 
-## Known Working Hardware
+`diagnose.sh` dumps DMI, kernel, ACPI tables, init layout, wakeup sources and
+the relevant `dmesg` lines. Run it before and after any change.
 
-| Machine | Board | BIOS | PM1a Port | S5 SLP_TYP | Value |
-|---------|-------|------|-----------|------------|-------|
-| Alienware ASM100 (Alpha R1) | 0J8H4R | A08 | 0x1804 | 7 | 0x3C00 |
-
-**Please report** if this fix works on your hardware so we can expand
-the table.
+`test_shutdown.sh` tries the various power-off methods (`poweroff`, sysrq, EFI,
+ACPI, halt, PCI) so you can establish which, if any, work on your board before
+reaching for a register write.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `acpi_poweroff.sh` | The fix — universal, reads ACPI tables at runtime |
-| `diagnose.sh` | Diagnostic dump for debugging power-off issues |
-| `test_shutdown.sh` | Tests different power-off methods |
+| `acpi_s5_poweroff.sh` | The S5 register write, with runtime ACPI table lookup and a fallback to stock `halt`. |
+| `diagnose.sh` | Diagnostic dump. |
+| `test_shutdown.sh` | Tries different power-off methods. |
 
 ## License
 

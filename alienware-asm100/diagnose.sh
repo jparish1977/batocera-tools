@@ -53,6 +53,17 @@ ip link show >> $LOG
 echo "=== EFI variables ===" >> $LOG
 ls /sys/firmware/efi/efivars/ | head -20 >> $LOG
 
+echo "=== Init system and shutdown path ===" >> $LOG
+ls -l /sbin/init /sbin/halt /sbin/poweroff /sbin/reboot /sbin/shutdown >> $LOG 2>&1
+echo "--- symlinks resolve to ---" >> $LOG
+readlink -f /sbin/poweroff /sbin/reboot /sbin/halt >> $LOG 2>&1
+echo "--- inittab ---" >> $LOG
+cat /etc/inittab >> $LOG 2>&1
+echo "--- overlay / squashfs mounts ---" >> $LOG
+mount | grep -iE 'overlay|squash' >> $LOG 2>&1
+echo "--- custom.sh ---" >> $LOG
+cat /userdata/system/custom.sh >> $LOG 2>&1
+
 echo "=== Done ===" >> $LOG
 echo "Diagnostic saved to $LOG"
 cat $LOG
