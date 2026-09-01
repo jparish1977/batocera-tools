@@ -78,10 +78,21 @@ fi
 # 2. Install the S5 script on the root filesystem.
 #
 # `install` writes a new inode rather than following a symlink, which is the
-# mistake that caused this whole problem in the first place.
-rm -f "$S5_DEST"
-install -m 0755 "$S5_SRC" "$S5_DEST" || fail "could not install $S5_DEST"
-log "installed $S5_DEST"
+# mistake that caused this whole problem in the first place. `rm -f` first so
+# that a path which IS a symlink gets replaced rather than written through.
+#
+# Only write when the content differs. Once the fix is in the saved overlay
+# this script is a no-op backstop, and rewriting an identical file every boot
+# just churns the overlay and puts a fresh mtime on it, which makes it harder
+# to tell a restored file from a freshly written one. That distinction is
+# exactly what proved the overlay was working.
+if cmp -s "$S5_SRC" "$S5_DEST"; then
+    log "$S5_DEST already current"
+else
+    rm -f "$S5_DEST"
+    install -m 0755 "$S5_SRC" "$S5_DEST" || fail "could not install $S5_DEST"
+    log "installed $S5_DEST"
+fi
 
 # 3. Repoint the runlevel-0 halt action, leaving every other entry alone.
 [ -w "$INITTAB" ] || fail "$INITTAB not writable"
